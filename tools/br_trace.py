@@ -74,7 +74,34 @@ def _wrap_init(base):
     base.__init__ = __init__
 
 
-def pytest_configure(config):
+def _import_everything():
+    """Import every sqlglot module before any test runs.
+
+    sqlglot loads dialects (and their parser/generator/typing modules) lazily,
+    so without this their import-time code (metaclasses, tables built by
+    helper functions in class bodies) is credited to whichever test happened
+    to trigger the import first in each worker. Importing up front puts all
+    import-time execution in coverage's empty (non-test) context, which
+    build_maps.py records as import_lines.
+    """
+    import importlib
+    import pkgutil
+
+    import sqlglot
+
+    for info in pkgutil.walk_packages(sqlglot.__path__, prefix="sqlglot."):
+        if info.name == "sqlglot.__main__":
+            continue
+        try:
+            importlib.import_module(info.name)
+        except Exception:
+            pass
+
+
+def pytest_collection(session):
+    # Runs after coverage has started in this worker and before any test.
+    _import_everything()
+
     from sqlglot import exp, generator, parser, tokens
     from sqlglot.dialects.dialect import Dialect
 
