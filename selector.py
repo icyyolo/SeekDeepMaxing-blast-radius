@@ -6,7 +6,8 @@ running sqlglot's own test suite at the pinned commit:
   - function and compound-statement spans (if/for/try/...): a changed line
     inside a function selects every test that runs any line of the
     innermost compound statement around it (or of the function)
-  - file reads: which tests open each fixture/data file
+  - file reads: which tests open each fixture/data file, or read a source
+    file as text
   - class usage: which tests instantiate each class (with its MRO)
   - import lines, a static import graph, multi-line string spans, and where
     each class attribute name is read
@@ -288,15 +289,31 @@ class Selector:
             if name == "conftest.py" or (path.startswith("tests/") and name == "__init__.py"):
                 return None, "new-conftest"
             # New file: existing tests cannot reach it unless another changed
-            # file imports it, which that file's own change will select.
+            # file imports it, which that file's own change will select, or a
+            # test lists its package and reads the sources it finds
+            # (test_typing scans sqlglot/typing/), so take the tests that read
+            # its sibling modules as text.
             if path.startswith("tests/") and not path.endswith(".py"):
                 return set(), "new-data"
-            return set(), "new-file"
+            folder = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+            siblings = set()
+            if path.endswith(".py"):
+                for other, readers in self.reads.items():
+                    rest = other[len(folder):]
+                    if other.startswith(folder) and "/" not in rest and rest.endswith(".py"):
+                        siblings.update(r for r in readers if r >= 0)
+            return self._nums(siblings), "new-file"
         if path.endswith(".py"):
             if info["new"] is None or info["new"] != info["old"]:
                 # Deleted or renamed module: every importer breaks.
                 return None, "deleted-or-renamed"
-            return self.for_py(path, info["lines"] | self._in_strings(path, info["comments"]))
+            got, why = self.for_py(path, info["lines"] | self._in_strings(path, info["comments"]))
+            # Tests that read this source file as text (not by importing it).
+            readers = [r for r in self.reads.get(path, ()) if r >= 0]
+            if got is not None and readers:
+                got = got | self._nums(readers)
+                why += "+read"
+            return got, why
         if path in self.reads:
             readers = self.reads[path]
             if -1 in readers:

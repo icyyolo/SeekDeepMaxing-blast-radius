@@ -1,8 +1,11 @@
 """pytest plugin used only while building maps (never in the scored image).
 
 Per test, records:
-  - reads: non-Python files under the sqlglot checkout the test opens, so
-    edits to tests/fixtures/*.sql map to the tests that read them.
+  - reads: files under the sqlglot checkout the test opens, so edits to
+    tests/fixtures/*.sql map to the tests that read them. Python files are
+    included: some tests read sqlglot source as text (test_typing parses
+    sqlglot/typing/*.py), which coverage cannot see. Imports do not go
+    through open(), so they are not recorded.
   - uses: sqlglot classes the test instantiates (Dialect, Parser, Generator,
     Tokenizer, Expr subclasses, with their whole MRO), so an edit to a class
     attribute (e.g. TSQL.WEEK_OFFSET) maps to tests that use that class even
@@ -52,7 +55,7 @@ def _traced_open(file, *args, **kwargs):
     try:
         if isinstance(file, (str, bytes, os.PathLike)):
             path = os.path.realpath(os.fsdecode(file))
-            if path.startswith(ROOT + os.sep) and not path.endswith((".py", ".pyc")):
+            if path.startswith(ROOT + os.sep) and not path.endswith(".pyc"):
                 rel = os.path.relpath(path, ROOT)
                 _reads.setdefault(_current[0], set()).add(rel)
     except Exception:
