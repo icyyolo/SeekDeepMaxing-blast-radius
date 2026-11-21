@@ -5,7 +5,10 @@ commit (coverage contexts and file reads) plus the AST of its source files.
 Nothing is derived from patches or answers.
 
 Usage (inside the br-map image):
-  python tools/build_maps.py /src /raw sample/tests.json maps/map.json.gz
+  python tools/build_maps.py /src /raw sample/tests.json maps/map.json.gz [/cmpraw]
+
+The optional /cmpraw is the output of tools/collect_cmp.sh (comparison
+divergence traces from br_cmp.py).
 """
 import ast
 import glob
@@ -17,6 +20,7 @@ import sys
 from coverage import CoverageData
 
 SRC, RAW, TESTS_JSON, OUT = sys.argv[1:5]
+CMPRAW = sys.argv[5] if len(sys.argv) > 5 else None
 
 test_ids = [t["id"] for t in json.load(open(TESTS_JSON))["tests"]]
 index = {tid: i for i, tid in enumerate(test_ids)}
@@ -209,6 +213,29 @@ for path in glob.glob(os.path.join(SRC, "sqlglot", "**", "*.py"), recursive=True
 assigned = {n for e in files.values() for _s, _e, names in e.get("assigns", ()) for n in names}
 refs = {n: sorted(refs_raw.get(n, ())) for n in assigned}
 
+# Comparison divergence: path -> {"line:col": class id of the tests in which
+# swapping that operator for its twin changes the result, or -1 if it does
+# so outside any known test (import time), where it cannot be traced}.
+# Only comparisons that ran are listed.
+cmp = {}
+if CMPRAW:
+    ran, div = set(), {}
+    for fn in glob.glob(os.path.join(CMPRAW, "cmp-*.json")):
+        d = json.load(open(fn))
+        sites = [tuple(s[:3]) for s in d["sites"]]
+        ran.update(sites[i] for i in d["ran"])
+        for ctx, ids in d["diverged"].items():
+            got = tests_of(ctx) or [-1]
+            for i in ids:
+                div.setdefault(sites[i], set()).update(got)
+    for site in ran:
+        path, line, col = site
+        tests = div.get(site, set())
+        cid = -1 if -1 in tests else classes.setdefault(frozenset(tests), len(classes))
+        cmp.setdefault(path, {})[f"{line}:{col}"] = cid
+    print(f"cmp: {len(ran)} sites ran, {sum(1 for s in ran if s in div)} diverge somewhere, "
+          f"{sum(1 for v in cmp.values() for c in v.values() if c == -1)} at import")
+
 class_list = [None] * len(classes)
 for key, cid in classes.items():
     class_list[cid] = sorted(key)
@@ -221,6 +248,7 @@ out = {
     "uses": {k: sorted(s) for k, s in uses.items()},
     "importers": {k: sorted(s) for k, s in importers.items()},
     "refs": refs,
+    "cmp": cmp,
 }
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 with gzip.open(OUT, "wt") as f:

@@ -49,6 +49,10 @@ INERT = re.compile(
 #             module importing it, plus tests that read it as text
 #   all     - run every test on every commit
 SAFE = set(filter(None, os.environ.get("BR_SAFE", "").split(",")))
+# Comparison operators traced by tools/br_cmp.py, and their twins.
+CMP_OP = re.compile(r"is\s+not\b|is\b|==|!=|<=|>=|<(?![<=>])|>(?![>=])")
+CMP_TWIN = {"is": "==", "==": "is", "is not": "!=", "!=": "is not",
+            "<": "<=", "<=": "<", ">": ">=", ">=": ">"}
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 DIFF = re.compile(r"^diff --git a/(.+) b/(.+)$")
 
@@ -63,7 +67,10 @@ def _is_comment(code):
 
 
 def parse_patch(text):
-    """Return {old_path: {"old", "new", "lines": set(old line numbers touched)}}.
+    """Return {old_path: {"old", "new", "lines": set(old line numbers touched),
+    "comments", "swaps": {old line number: (old text, new text)}}}.
+
+    A swap is a run of exactly one removed line followed by one added line.
 
     Files are registered from the "diff --git" header, so renames, mode
     changes and binary diffs (which have no ---/+++ lines) are not dropped.
@@ -72,6 +79,13 @@ def parse_patch(text):
     """
     files = {}
     cur = None
+    run = []  # (tag, old line, text) of the current run of -/+ code lines
+
+    def flush():
+        if cur is not None and [r[0] for r in run] == ["-", "+"]:
+            cur["swaps"][run[0][1]] = (run[0][2], run[1][2])
+        run.clear()
+
     in_header = True
     pending_old = None
     old_line = 0
@@ -80,8 +94,9 @@ def parse_patch(text):
     for line in text.splitlines():
         m = DIFF.match(line)
         if m:
+            flush()
             old, new = m.groups()
-            cur = files.setdefault(old, {"old": old, "new": new, "lines": set(), "comments": set()})
+            cur = files.setdefault(old, {"old": old, "new": new, "lines": set(), "comments": set(), "swaps": {}})
             in_header = True
             continue
         if in_header and cur is not None:
@@ -98,12 +113,13 @@ def parse_patch(text):
             new = None if new == "/dev/null" else new[2:] if new.startswith("b/") else new
             if cur is None:  # plain unified diff without a "diff --git" header
                 key = pending_old if pending_old is not None else new
-                cur = files.setdefault(key, {"old": pending_old, "new": new, "lines": set(), "comments": set()})
+                cur = files.setdefault(key, {"old": pending_old, "new": new, "lines": set(), "comments": set(), "swaps": {}})
             else:
                 cur["old"], cur["new"] = pending_old, new
             continue
         m = HUNK.match(line)
         if m and cur is not None:
+            flush()
             in_header = False
             old_line = int(m.group(1))
             is_py = (cur["new"] or cur["old"] or "").endswith(".py")
@@ -113,6 +129,7 @@ def parse_patch(text):
             continue
         if cur is None or not line:
             if cur is not None and not line:
+                flush()
                 old_line += 1
                 replacing = False
             continue
@@ -127,6 +144,8 @@ def parse_patch(text):
             else:
                 cur["comments"].add((old_line - 1, old_line))
             continue
+        if tag in "+-":
+            run.append((tag, old_line, line[1:]))
         if tag == "-":
             cur["lines"].add(old_line)
             old_line += 1
@@ -137,8 +156,12 @@ def parse_patch(text):
             if not replacing:
                 cur["lines"].update((old_line - 1, old_line))
         elif tag == " ":
+            flush()
             old_line += 1
             replacing = False
+        else:
+            flush()
+    flush()
     return files
 
 
@@ -156,6 +179,7 @@ class Selector:
         self.uses = m["uses"]
         self.importers = m.get("importers", {})
         self.refs = m.get("refs", {})
+        self.cmp = m.get("cmp", {})
         self.tests_by_file = {}
         for t in tests:
             self.tests_by_file.setdefault(t["file"], set()).add(t["number"])
@@ -290,6 +314,25 @@ class Selector:
             why = "class"
         return selected, why
 
+    def _swapped_cmp(self, path, old, new, line):
+        """If new is old with one traced comparison operator swapped for its
+        twin (is/==, is not/!=, </<=, >/>=), the tests in which that swap
+        changes the comparison's result; else None."""
+        sites = self.cmp.get(path)
+        if not sites:
+            return None
+        for col in range(len(old)):
+            cid = sites.get(f"{line}:{col}")
+            if cid is None:
+                continue
+            m = CMP_OP.match(old, col)
+            if not m:
+                continue
+            twin = CMP_TWIN.get(" ".join(m.group().split()))
+            if twin and new == old[:col] + twin + old[m.end():]:
+                return None if cid < 0 else self._nums(self.classes[cid])
+        return None
+
     def for_path(self, info):
         path = info["old"] or info["new"]
         if INERT.match(path):
@@ -317,7 +360,20 @@ class Selector:
             if info["new"] is None or info["new"] != info["old"]:
                 # Deleted or renamed module: every importer breaks.
                 return None, "deleted-or-renamed"
-            got, why = self.for_py(path, info["lines"] | self._in_strings(path, info["comments"]))
+            lines = info["lines"] | self._in_strings(path, info["comments"])
+            # A swapped comparison operator only matters in the tests where
+            # the twin gives a different result there.
+            swapped, matched = set(), False
+            for line, (old, new) in info.get("swaps", {}).items():
+                got = self._swapped_cmp(path, old, new, line) if line in lines else None
+                if got is not None:
+                    lines, matched = lines - {line}, True
+                    swapped |= got
+            got, why = self.for_py(path, lines)
+            if swapped and got is not None:
+                got = got | swapped
+            if matched:
+                why += "+cmp"
             # Tests that read this source file as text (not by importing it).
             readers = [r for r in self.reads.get(path, ()) if r >= 0]
             if got is not None and readers:
