@@ -1,0 +1,5 @@
+# Map-building image only (not the scored image). Same base image the
+# organizers labeled with, so the same tests run and skip.
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
+COPY requirements.lock /tmp/requirements.lock
+RUN pip install --no-cache-dir -r /tmp/requirements.lock pytest-cov==7.0.0 coverage==7.10.7
