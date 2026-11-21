@@ -24,6 +24,8 @@ import json
 import os
 import pickle
 
+import pytest
+
 
 class _SyncExecutor(concurrent.futures.Executor):
     def __init__(self, max_workers=None, mp_context=None, initializer=None, initargs=(), **kwargs):
@@ -151,6 +153,26 @@ def pytest_runtest_protocol(item, nextitem):
     _current[0] = item.nodeid
     for cache in _caches:
         cache.clear()
+
+
+# Setup/teardown work is keyed "nodeid|setup" / "nodeid|teardown" (the same
+# phases coverage contexts record). setUpClass runs inside the first test's
+# setup and its results (fixtures loaded into class attributes) are shared by
+# the whole class, so build_maps.py credits setup/teardown effects to every
+# test of that class.
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    _current[0] = item.nodeid + "|setup"
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_call(item):
+    _current[0] = item.nodeid
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_teardown(item, nextitem):
+    _current[0] = item.nodeid + "|teardown"
 
 
 def pytest_runtest_logfinish(nodeid, location):

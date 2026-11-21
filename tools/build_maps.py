@@ -22,10 +22,25 @@ test_ids = [t["id"] for t in json.load(open(TESTS_JSON))["tests"]]
 index = {tid: i for i, tid in enumerate(test_ids)}
 
 
-def test_of(context):
-    """'tests/x.py::C::t|run' -> index, or None for import-time contexts."""
-    nodeid = context.split("|")[0]
-    return index.get(nodeid)
+by_class = {}
+for tid, i in index.items():
+    by_class.setdefault(tid.rsplit("::", 1)[0], []).append(i)
+
+
+def tests_of(context):
+    """'tests/x.py::C::t|run' -> [index], or [] for import-time contexts.
+
+    Setup and teardown phases run class-level fixtures (setUpClass loads data
+    into class attributes once, in whichever test of the class runs first on
+    a worker), and every test of the class depends on them, so those phases
+    are credited to all tests of the class.
+    """
+    nodeid, _, phase = context.partition("|")
+    if nodeid not in index:
+        return []
+    if phase in ("setup", "teardown"):
+        return by_class[nodeid.rsplit("::", 1)[0]]
+    return [index[nodeid]]
 
 
 data = CoverageData(basename=os.path.join(RAW, ".coverage"))
@@ -47,11 +62,10 @@ for abs_path in data.measured_files():
         for ctx in contexts:
             if not ctx:
                 continue
-            i = test_of(ctx)
-            if i is None:
+            got = tests_of(ctx)
+            if not got:
                 unknown_contexts.add(ctx.split("|")[0])
-            else:
-                tests.add(i)
+            tests.update(got)
         if "" in contexts:
             import_lines.append(lineno)
         if tests:
@@ -133,21 +147,17 @@ for path in glob.glob(os.path.join(SRC, "sqlglot", "**", "*.py"), recursive=True
 reads = {}
 for path in glob.glob(os.path.join(RAW, "reads-*.json")):
     for ctx, read_files in json.load(open(path)).items():
-        i = index.get(ctx)
+        got = tests_of(ctx) or [-1]  # -1: read outside any test (collection time)
         for f in read_files:
-            reads.setdefault(f, set())
-            if i is None:
-                reads[f].add(-1)  # read outside any test (collection time)
-            else:
-                reads[f].add(i)
+            reads.setdefault(f, set()).update(got)
 
 # Classes each test instantiated (with MRO), keyed "path::Qualname".
 uses = {}
 for path in glob.glob(os.path.join(RAW, "uses-*.json")):
     for ctx, keys in json.load(open(path)).items():
-        i = index.get(ctx)
+        got = tests_of(ctx) or [-1]
         for key in keys:
-            uses.setdefault(key, set()).add(-1 if i is None else i)
+            uses.setdefault(key, set()).update(got)
 
 # Static import graph: importers[m] = files that import module m anywhere
 # (top level or inside functions). Used to find what depends on a module's
