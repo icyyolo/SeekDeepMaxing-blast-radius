@@ -26,6 +26,7 @@ time plus 2 s per worker.
 import bisect
 import gzip
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -39,6 +40,15 @@ MAX_WORKERS = 8
 INERT = re.compile(
     r"^(docs/|posts/|benchmarks/|pdoc/|\.github/|README|CHANGELOG|CONTRIBUTING|LICENSE|AGENTS\.md|CLAUDE\.md|sqlglot\.png)"
 )
+# Safety net, off by default. A comma list of kinds of changed file that get
+# a wider selection than the maps give, trading time for fewer misses:
+#   data    - a non-Python file (fixtures, configs): run every test
+#   comment - a Python file where only comment or blank lines changed: run every test
+#   code    - a Python code change: run every test
+#   wide    - a Python code change: every test of the module and of every
+#             module importing it, plus tests that read it as text
+#   all     - run every test on every commit
+SAFE = set(filter(None, os.environ.get("BR_SAFE", "").split(",")))
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 DIFF = re.compile(r"^diff --git a/(.+) b/(.+)$")
 
@@ -323,11 +333,42 @@ class Selector:
             return None, "unread-fixture"
         return None, "unknown"
 
+    @staticmethod
+    def kind_of(info):
+        path = info["old"] or info["new"]
+        if INERT.match(path):
+            return "inert"
+        if not path.endswith(".py"):
+            return "data"
+        if info["lines"] or info["old"] is None or info["new"] != info["old"]:
+            return "code"
+        return "comment"
+
+    def safe_path(self, info):
+        """The SAFE widening for one changed file: (tests or None for all, note),
+        or False when SAFE does not apply to it."""
+        kind = self.kind_of(info)
+        if kind == "inert":
+            return False
+        if "all" in SAFE or kind in SAFE:
+            return None, f"safe-{kind}"
+        if kind == "code" and "wide" in SAFE:
+            path = info["old"] or info["new"]
+            if info["old"] is None or path not in self.files:
+                return None, "safe-wide"
+            got = self._module_tests(path) | self._nums(r for r in self.reads.get(path, ()) if r >= 0)
+            return got, "safe-wide"
+        return False
+
     def select(self, patch_text):
         selected = set()
         notes = []
         for info in parse_patch(patch_text).values():
             got, why = self.for_path(info)
+            safe = self.safe_path(info) if SAFE else False
+            if safe is not False:
+                wide, why = safe
+                got = None if wide is None or got is None else got | wide
             notes.append(f"{info['old'] or info['new']}:{why}")
             if got is None:
                 return set(self.all_tests), notes + ["ALL"]
