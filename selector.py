@@ -48,7 +48,7 @@ INERT = re.compile(
 #   wide    - a Python code change: every test of the module and of every
 #             module importing it, plus tests that read it as text
 #   all     - run every test on every commit
-SAFE = set(filter(None, os.environ.get("BR_SAFE", "").split(",")))
+SAFE = set(filter(None, os.environ.get("BR_SAFE", "data").split(",")))
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 DIFF = re.compile(r"^diff --git a/(.+) b/(.+)$")
 
