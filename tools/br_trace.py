@@ -98,9 +98,24 @@ def _import_everything():
             pass
 
 
+_caches = []  # module-level memo dicts, emptied before every test
+
+
 def pytest_collection(session):
     # Runs after coverage has started in this worker and before any test.
     _import_everything()
+
+    # Module-level memo dicts (e.g. generator._DISPATCH_CACHE, filled on a
+    # class's first use) would credit the code that fills them only to the
+    # first test in each worker that triggers it. Emptying them before every
+    # test credits that code to every test that depends on it.
+    import sys
+
+    for name, module in list(sys.modules.items()):
+        if name == "sqlglot" or name.startswith("sqlglot."):
+            for attr, value in vars(module).items():
+                if "CACHE" in attr.upper() and isinstance(value, dict):
+                    _caches.append(value)
 
     from sqlglot import exp, generator, parser, tokens
     from sqlglot.dialects.dialect import Dialect
@@ -131,6 +146,8 @@ def pytest_collection(session):
 
 def pytest_runtest_protocol(item, nextitem):
     _current[0] = item.nodeid
+    for cache in _caches:
+        cache.clear()
 
 
 def pytest_runtest_logfinish(nodeid, location):
